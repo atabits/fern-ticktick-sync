@@ -1,7 +1,7 @@
 {
   "id": "com.fern.ticktick-sync",
   "name": "TickTick Sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "api_version": 1,
   "min_fern_version": "0.2.0",
   "description": "Two-way sync of lists and tasks with TickTick (OAuth 2.0).",

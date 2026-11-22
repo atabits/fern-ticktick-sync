@@ -1241,3 +1241,129 @@ test("C11 & M12 & M13: remote recurring completion without successor skips Phase
   assert.equal(r4.ok, false);
   assert.equal(createAttempts, 1);
 });
+
+test("tags: auto-creates missing TickTick tags via POST /open/v1/tag and keeps mixed-case tags idempotent", async () => {
+  const remoteTags = [{ name: "работа", label: "работа" }];
+  const h = createMockHarness({
+    initialLists: [{ id: "fl-work", name: "Work" }],
+    remoteProjects: [{ id: "tp-work", name: "Work" }],
+    remoteTasksByProject: {
+      "tp-work": [{ id: "tt-1", title: "Tagged task", tags: [] }],
+    },
+  });
+  h.api.listTags = async () => {
+    h.apiCalls.push({ op: "listTags" });
+    return remoteTags.map((t) => ({ ...t }));
+  };
+  h.api.createTag = async (name, label) => {
+    h.apiCalls.push({ op: "createTag", name, label });
+    const created = { name, label };
+    remoteTags.push(created);
+    return created;
+  };
+
+  const engine = createSyncEngine(h.fern, h.api);
+  await engine.syncNow();
+
+  const local = Array.from(h.tasks.values())[0];
+  h.fern.tasks.update(local.id, { tags: ["Finance", "Работа"] });
+  h.apiCalls.length = 0;
+
+  const r2 = await engine.syncNow();
+  assert.equal(r2.ok, true);
+  assert.equal(r2.stats.pushed, 1);
+  // Only missing tag ("finance") created; existing "работа" (case-insensitive) NOT re-created.
+  const tagCreates = h.apiCalls.filter((c) => c.op === "createTag");
+  assert.equal(tagCreates.length, 1);
+  assert.equal(tagCreates[0].name, "finance");
+  assert.equal(tagCreates[0].label, "Finance");
+
+  // TickTick payload receives lowercase tag names per OpenTag.name spec.
+  assert.deepEqual(h.remoteTasks.get("tt-1").tags, ["finance", "работа"]);
+
+  // Sync #3 must be a clean no-op despite Fern keeping "Finance"/"Работа" and TickTick returning lowercase.
+  h.apiCalls.length = 0;
+  const r3 = await engine.syncNow();
+  assert.equal(r3.ok, true);
+  assert.equal(r3.stats.pulled, 0);
+  assert.equal(r3.stats.pushed, 0);
+  assert.equal(r3.stats.conflicts, 0);
+  assert.deepEqual(h.tasks.get(local.id).tags, ["Finance", "Работа"]);
+});
+
+test("lists: moving to unsynced list never duplicates on next sync; synced move calls moveTask; enableLocalList creates TickTick project", async () => {
+  const h = createMockHarness({
+    initialLists: [
+      { id: "fl-work", name: "Work" },
+      { id: "fl-personal", name: "Personal" },
+      { id: "fl-local-only", name: "Local List" },
+    ],
+    remoteProjects: [
+      { id: "tp-work", name: "Work" },
+      { id: "tp-personal", name: "Personal" },
+    ],
+    remoteTasksByProject: {
+      "tp-work": [
+        { id: "tt-move-synced", title: "Move between synced" },
+        { id: "tt-move-local", title: "Move to local list" },
+      ],
+      "tp-personal": [],
+    },
+  });
+  h.api.moveTask = async (fromPid, toPid, tid) => {
+    h.apiCalls.push({ op: "moveTask", fromPid, toPid, tid });
+    const rt = h.remoteTasks.get(tid);
+    if (rt) rt.projectId = toPid;
+    return [{ id: tid, etag: "moved" }];
+  };
+  h.api.createProject = async (name, color) => {
+    const id = `tp-created-${name}`;
+    const proj = { id, name, color };
+    h.apiCalls.push({ op: "createProject", id, name, color });
+    h.api.listProjects = async () => [
+      { id: "tp-work", name: "Work" },
+      { id: "tp-personal", name: "Personal" },
+      proj,
+    ];
+    return proj;
+  };
+
+  const engine = createSyncEngine(h.fern, h.api);
+  await engine.syncNow();
+  assert.equal(h.tasks.size, 2);
+
+  const tSynced = Array.from(h.tasks.values()).find((t) => t.title === "Move between synced");
+  const tLocal = Array.from(h.tasks.values()).find((t) => t.title === "Move to local list");
+
+  // 1. Move tSynced from Work -> Personal (both synced): must call moveTask before updateTask!
+  h.fern.tasks.update(tSynced.id, { listId: "fl-personal" });
+  // 2. Move tLocal from Work -> Local List (unsynced): must unlink + tombstone tt-move-local!
+  h.fern.tasks.update(tLocal.id, { listId: "fl-local-only" });
+  h.apiCalls.length = 0;
+
+  const r2 = await engine.syncNow();
+  assert.equal(r2.ok, true);
+  const moveCall = h.apiCalls.find((c) => c.op === "moveTask");
+  assert.deepEqual(moveCall, {
+    op: "moveTask",
+    fromPid: "tp-work",
+    toPid: "tp-personal",
+    tid: "tt-move-synced",
+  });
+  assert.equal(h.remoteTasks.get("tt-move-synced").projectId, "tp-personal");
+  assert.ok(engine.loadState().unlinkedTtIds["tt-move-local"]);
+
+  // 3. Subsequent sync must NOT re-import tt-move-local as a duplicate!
+  const r3 = await engine.syncNow();
+  assert.equal(r3.ok, true);
+  assert.equal(r3.stats.pulled, 0);
+  assert.equal(h.tasks.size, 2);
+
+  // 4. Enabling Local List creates TickTick project and pushes tLocal into it on next sync.
+  const en = await engine.enableLocalList("fl-local-only");
+  assert.equal(en.ok, true);
+  assert.equal(en.projectId, "tp-created-Local List");
+  const r4 = await engine.syncNow();
+  assert.equal(r4.ok, true);
+  assert.equal(r4.stats.pushed, 1);
+});

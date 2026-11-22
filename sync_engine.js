@@ -25,6 +25,7 @@ export function defaultSyncState() {
     tasks: {}, // { [fernId]: { ttId, ttProjectId, baseHash, lastSyncedAt, isRecurring } }
     ttToFern: {}, // { [ttId]: fernId }
     unlinkedFernIds: {}, // { [fernId]: timestamp } tombstones for delete_policy: "unlink"
+    unlinkedTtIds: {}, // { [ttId]: timestamp } tombstones for tasks moved to an unsynced Fern list
     inboxProjectId: null,
     inboxEnabled: true,
     mappingEpoch: 0,
@@ -77,6 +78,8 @@ export function createSyncEngine(fern, api) {
       ttToFern: raw.ttToFern && typeof raw.ttToFern === "object" ? raw.ttToFern : {},
       unlinkedFernIds:
         raw.unlinkedFernIds && typeof raw.unlinkedFernIds === "object" ? raw.unlinkedFernIds : {},
+      unlinkedTtIds:
+        raw.unlinkedTtIds && typeof raw.unlinkedTtIds === "object" ? raw.unlinkedTtIds : {},
       mappingEpoch: Number.isFinite(Number(raw.mappingEpoch)) ? Number(raw.mappingEpoch) : 0,
     };
   }
@@ -204,6 +207,9 @@ export function createSyncEngine(fern, api) {
     if (state.unlinkedFernIds && state.unlinkedFernIds[fernId]) {
       delete state.unlinkedFernIds[fernId];
     }
+    if (state.unlinkedTtIds && state.unlinkedTtIds[ttId]) {
+      delete state.unlinkedTtIds[ttId];
+    }
   }
 
   function resolveFernListForTtProject(state, ttProjectId) {
@@ -273,6 +279,49 @@ export function createSyncEngine(fern, api) {
         return latest;
       }
       return null;
+    }
+
+    // Lazily fetch existing TickTick tags once per sync and ensure any new Fern tags
+    // exist via POST /open/v1/tag before attaching them to tasks.
+    let remoteTagsSet = null;
+    async function ensureRemoteTags(tags) {
+      if (!Array.isArray(tags) || tags.length === 0) return;
+      const labels = tags
+        .map((raw) => String(raw || "").trim().slice(0, 64))
+        .filter(Boolean);
+      if (labels.length === 0) return;
+
+      if (remoteTagsSet === null) {
+        remoteTagsSet = new Set();
+        if (typeof api.listTags === "function") {
+          try {
+            const existing = await api.listTags();
+            if (Array.isArray(existing)) {
+              for (const tg of existing) {
+                const name = tg && typeof tg === "object" ? tg.name || tg.label : tg;
+                if (name) remoteTagsSet.add(String(name).trim().toLowerCase());
+              }
+            }
+          } catch (err) {
+            if (isAbortingApiError(err)) throw err;
+            // Best-effort: continue even if GET /open/v1/tag is unavailable.
+          }
+        }
+      }
+
+      if (typeof api.createTag !== "function") return;
+      for (const label of labels) {
+        const lower = label.toLowerCase();
+        if (remoteTagsSet.has(lower)) continue;
+        try {
+          await api.createTag(lower, label);
+          remoteTagsSet.add(lower);
+        } catch (err) {
+          if (isAbortingApiError(err)) throw err;
+          // Tag may already exist or creation may be rejected; still attach in task payload.
+          remoteTagsSet.add(lower);
+        }
+      }
     }
 
     try {
@@ -576,10 +625,15 @@ export function createSyncEngine(fern, api) {
             appendLog("info", `↓ Updated in Fern: "${updated.title}"`);
             processedDirtyIds.add(fernId);
           } else if (action === "push") {
-            // If the task was moved to an unsynced Fern list, unlink instead of pushing to a stale project.
+            // If the task was moved to an unsynced Fern list, unlink instead of pushing to a stale project
+            // and record a remote tombstone so Phase C does not re-import a duplicate on the next sync.
             if (!isFernListSynced(state, localTask.listId)) {
+              const prevTtId = link.ttId;
               unlinkTask(state, fernId);
-              remoteById.delete(link.ttId);
+              if (prevTtId) {
+                state.unlinkedTtIds[prevTtId] = Date.now();
+                remoteById.delete(prevTtId);
+              }
               skipPushFernIds.add(fernId);
               appendLog("info", `Unlinked "${localTask.title}" (moved to unsynced list).`);
               processedDirtyIds.add(fernId);
@@ -590,6 +644,15 @@ export function createSyncEngine(fern, api) {
               localTask.parentId && state.tasks[localTask.parentId]
                 ? state.tasks[localTask.parentId].ttId
                 : null;
+            await ensureRemoteTags(localNorm.tags);
+            if (
+              targetTtPid &&
+              remoteProjectId &&
+              targetTtPid !== remoteProjectId &&
+              typeof api.moveTask === "function"
+            ) {
+              await api.moveTask(remoteProjectId, targetTtPid, link.ttId);
+            }
             const payload = fernTaskToTtPayload(
               localTask,
               localChecklist,
@@ -644,7 +707,7 @@ export function createSyncEngine(fern, api) {
       if (allowPull) {
         const unlinkedRemote = [];
         for (const [ttId, ttTask] of remoteById.entries()) {
-          if (!state.ttToFern[ttId]) {
+          if (!state.ttToFern[ttId] && !state.unlinkedTtIds[ttId]) {
             unlinkedRemote.push(ttTask);
           }
         }
@@ -794,6 +857,7 @@ export function createSyncEngine(fern, api) {
                 ? state.tasks[ft.parentId].ttId
                 : null;
             const checklist = getChecklist(ft.id);
+            await ensureRemoteTags(normalizeFernTask(ft, checklist).tags);
             const payload = fernTaskToTtPayload(ft, checklist, targetTtPid, null, ttParentId);
             const created = await api.createTask(payload);
             const resolvedPid = created.projectId || targetTtPid;
@@ -877,6 +941,39 @@ export function createSyncEngine(fern, api) {
     }
   }
 
+  async function enableLocalList(fernListId) {
+    if (syncing) {
+      return { ok: false, skipped: true, reason: "already_running" };
+    }
+    const lists = fern.lists.all();
+    const lst = lists.find((l) => l && l.id === fernListId && !l.archived && !l.completedAt);
+    if (!lst) {
+      return { ok: false, error: "List not found" };
+    }
+    const state = loadState();
+    for (const [ttPid, meta] of Object.entries(state.projects || {})) {
+      if (meta && meta.fernListId === fernListId) {
+        meta.enabled = true;
+        saveState(state);
+        return { ok: true, projectId: ttPid, state };
+      }
+    }
+    if (typeof api.createProject !== "function") {
+      return { ok: false, error: "TickTick project creation unavailable" };
+    }
+    const created = await api.createProject(lst.name, lst.color || null);
+    const latest = loadState();
+    latest.projects[created.id] = {
+      fernListId: lst.id,
+      name: created.name || lst.name,
+      color: created.color || lst.color || null,
+      enabled: true,
+    };
+    saveState(latest);
+    appendLog("info", `↑ Created TickTick list "${lst.name}" and enabled sync.`);
+    return { ok: true, projectId: created.id, state: latest };
+  }
+
   return {
     loadState,
     loadDirtyQueue,
@@ -884,6 +981,7 @@ export function createSyncEngine(fern, api) {
     clearLogs,
     enqueueLocalEvent,
     toggleProjectEnabled,
+    enableLocalList,
     resetMapping,
     syncNow,
     isSyncing: () => syncing,

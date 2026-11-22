@@ -517,7 +517,11 @@ export function normalizeTags(tags) {
       out.push(t);
     }
   }
-  out.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  out.sort((a, b) => {
+    const al = a.toLowerCase();
+    const bl = b.toLowerCase();
+    return al < bl ? -1 : al > bl ? 1 : 0;
+  });
   return out;
 }
 
@@ -642,7 +646,7 @@ export function canonicalTaskHash(norm) {
     endDate: norm.endDate,
     endTime: norm.endTime,
     repeat: norm.repeat,
-    tags: norm.tags,
+    tags: norm.tags.map((t) => t.toLowerCase()),
     checklist: norm.checklist,
     reminders: norm.reminders,
     completed: norm.completed,
@@ -732,7 +736,8 @@ export function fernTaskToTtPayload(fernTask, checklistItems, ttProjectId, exist
     payload.repeatFlag = "";
   }
   if (norm.tags.length > 0) {
-    payload.tags = norm.tags;
+    // TickTick Open API v1 tag `name` values are lowercase & trimmed (max 64 chars).
+    payload.tags = norm.tags.map((t) => t.trim().slice(0, 64).toLowerCase()).filter(Boolean);
   } else if (isUpdate) {
     payload.tags = [];
   }

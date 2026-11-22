@@ -224,6 +224,52 @@ export function createTickTickClient(fern, options = {}) {
       return Array.isArray(res.data) ? res.data : [];
     },
 
+    async createProject(name, color = null) {
+      const trimmed = String(name || "").trim();
+      if (!trimmed) {
+        throw createApiError("Missing required TickTick project name", { code: "INVALID_ARGUMENT" });
+      }
+      const payload = { name: trimmed, kind: "TASK" };
+      if (color && typeof color === "string" && color.trim()) {
+        payload.color = color.trim();
+      }
+      const res = await request("POST", "/project", payload);
+      if (!res.data || !res.data.id) {
+        throw createApiError("TickTick createProject response missing project id", {
+          status: res.status,
+          code: "INVALID_RESPONSE",
+        });
+      }
+      return res.data;
+    },
+
+    async listTags() {
+      const res = await request("GET", "/tag", undefined, { allow404: true });
+      if (res.notFound || !Array.isArray(res.data)) return [];
+      return res.data;
+    },
+
+    async createTag(name, label = null) {
+      const rawLabel = String(label || name || "").trim().slice(0, 64);
+      const lowerName = String(name || rawLabel).trim().slice(0, 64).toLowerCase();
+      if (!lowerName) {
+        throw createApiError("Missing required TickTick tag name", { code: "INVALID_ARGUMENT" });
+      }
+      const safeLabel = rawLabel && rawLabel.toLowerCase() === lowerName ? rawLabel : lowerName;
+      const res = await request("POST", "/tag", { name: lowerName, label: safeLabel });
+      return res.data || { name: lowerName, label: safeLabel };
+    },
+
+    async moveTask(fromProjectId, toProjectId, taskId) {
+      const fromPid = requireId(fromProjectId, "fromProjectId");
+      const toPid = requireId(toProjectId, "toProjectId");
+      const tid = requireId(taskId, "taskId");
+      const res = await request("POST", "/task/move", [
+        { fromProjectId: fromPid, toProjectId: toPid, taskId: tid },
+      ]);
+      return res.data || [];
+    },
+
     async getProjectData(projectId) {
       const pid = requireId(projectId, "projectId");
       const res = await request("GET", `/project/${encodeURIComponent(pid)}/data`, undefined, {

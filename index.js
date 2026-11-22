@@ -12,6 +12,8 @@ import { createSyncEngine, INBOX_KEY } from "./sync_engine.js";
 
 const VIEW_ID = "sync";
 const TIMER_ID = "ticktick-auto-sync";
+const DIRTY_PUSH_TIMER_ID = "ticktick-dirty-push";
+const DIRTY_PUSH_DELAY_MS = 10_000;
 const DEVELOPER_PORTAL_URL = "https://developer.ticktick.com/manage";
 const OAUTH_TIMEOUT_SEC = 120;
 
@@ -76,6 +78,7 @@ const api = createTickTickClient(fern, {
   getOAuthSetup,
   onAuthExpired(message) {
     fern.timers.clearInterval(TIMER_ID);
+    fern.timers.clearInterval(DIRTY_PUSH_TIMER_ID);
     authError =
       message ||
       t(
@@ -203,6 +206,7 @@ async function disconnectAccount() {
   if (!confirmed || engine.isSyncing()) return;
   fern.oauth.clearTokens(["access_token", "refresh_token"]);
   fern.timers.clearInterval(TIMER_ID);
+  fern.timers.clearInterval(DIRTY_PUSH_TIMER_ID);
   api.resetRateLimit();
   authError = null;
   fern.ui.toast(t("TickTick отключён.", "Disconnected from TickTick."), "info");
@@ -265,11 +269,32 @@ async function runSync(showToast = true, opts = {}) {
 
 function configureAutoSyncTimer() {
   fern.timers.clearInterval(TIMER_ID);
+  if (!isConnected()) {
+    fern.timers.clearInterval(DIRTY_PUSH_TIMER_ID);
+    return;
+  }
+  const mins = Number(fern.settings.get("sync_interval_min") ?? 5);
+  if (!Number.isFinite(mins) || mins <= 0) {
+    fern.timers.clearInterval(DIRTY_PUSH_TIMER_ID);
+    return;
+  }
+  const intervalMs = Math.max(10_000, Math.round(mins * 60 * 1000));
+  fern.timers.setInterval(TIMER_ID, intervalMs, async () => {
+    if (!isConnected() || engine.isSyncing()) return;
+    if (api.getRateLimitedUntil() > Date.now()) return;
+    await runSync(false);
+  });
+}
+
+function scheduleDebouncedDirtyPush() {
   if (!isConnected()) return;
   const mins = Number(fern.settings.get("sync_interval_min") ?? 5);
   if (!Number.isFinite(mins) || mins <= 0) return;
-  const intervalMs = Math.max(10_000, Math.round(mins * 60 * 1000));
-  fern.timers.setInterval(TIMER_ID, intervalMs, async () => {
+  const direction = String(fern.settings.get("sync_direction") || "two_way");
+  if (direction === "pull_only") return;
+  // Reset one-shot timer on each local change so rapid edits coalesce into one sync.
+  fern.timers.setInterval(DIRTY_PUSH_TIMER_ID, DIRTY_PUSH_DELAY_MS, async () => {
+    fern.timers.clearInterval(DIRTY_PUSH_TIMER_ID);
     if (!isConnected() || engine.isSyncing()) return;
     if (api.getRateLimitedUntil() > Date.now()) return;
     await runSync(false);
@@ -430,7 +455,9 @@ function renderListsTab(state, busy) {
     }),
   ];
 
+  const mappedFernListIds = new Set();
   for (const [ttPid, meta] of projects) {
+    if (meta && meta.fernListId) mappedFernListIds.add(meta.fernListId);
     items.push(
       ui.checkbox({
         key: `proj-${ttPid}`,
@@ -439,6 +466,45 @@ function renderListsTab(state, busy) {
         label: meta.name || ttPid,
         onChange: (checked) => {
           engine.toggleProjectEnabled(ttPid, checked);
+          refreshView();
+        },
+      })
+    );
+  }
+
+  // Also show active local-only Fern lists so users can opt them into TickTick sync in 1 click.
+  let localOnlyLists = [];
+  try {
+    localOnlyLists = (fern.lists.all() || []).filter(
+      (l) => l && !l.archived && !l.completedAt && !mappedFernListIds.has(l.id)
+    );
+  } catch (_err) {
+    localOnlyLists = [];
+  }
+  for (const lst of localOnlyLists) {
+    items.push(
+      ui.checkbox({
+        key: `local-list-${lst.id}`,
+        checked: false,
+        disabled: busy,
+        label: `${lst.name} (${t("только в Fern — создать в TickTick", "Fern only — create in TickTick")})`,
+        onChange: async (checked) => {
+          if (!checked || engine.isSyncing()) return;
+          try {
+            const res = await engine.enableLocalList(lst.id);
+            if (res && res.ok) {
+              fern.ui.toast(
+                t(`Список «${lst.name}» подключён к TickTick`, `List "${lst.name}" linked to TickTick`),
+                "success"
+              );
+              refreshView();
+              await runSync(true);
+            } else if (res && res.error) {
+              fern.ui.toast(res.error, "error");
+            }
+          } catch (err) {
+            fern.ui.toast(String(err && err.message ? err.message : err), "error");
+          }
           refreshView();
         },
       })
@@ -460,7 +526,7 @@ function renderListsTab(state, busy) {
       title: t("Какие списки синхронизировать", "Synced Lists"),
     },
     [
-      projects.length === 0
+      projects.length === 0 && localOnlyLists.length === 0
         ? ui.vstack({ gap: 8 }, [
             ...items,
             ui.text({
@@ -657,6 +723,7 @@ function handleLocalTaskEvent(ev) {
   if (!isConnected()) return;
   if (ev.originPlugin === "com.fern.ticktick-sync") return;
   engine.enqueueLocalEvent(ev.kind, ev.entityId, ev.entity);
+  scheduleDebouncedDirtyPush();
   if (viewMounted) {
     refreshView();
   }
@@ -705,6 +772,7 @@ export function activate() {
 
 export function deactivate() {
   fern.timers.clearInterval(TIMER_ID);
+  fern.timers.clearInterval(DIRTY_PUSH_TIMER_ID);
   authInProgress = false;
   authAttemptId += 1;
   viewMounted = false;
