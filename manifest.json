@@ -32,7 +32,7 @@
     "onEvent:task.deleted"
   ],
   "contributions": {
-    "sidebar": [
+    "pages": [
       {
         "id": "sync",
         "title": "TickTick",
