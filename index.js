@@ -15,8 +15,10 @@ const TIMER_ID = "ticktick-auto-sync";
 const DEVELOPER_PORTAL_URL = "https://developer.ticktick.com/manage";
 
 // Fixed loopback callback handled automatically by Fern — user never edits host/port.
+// Port 18481 stays in the safe 10000–32000 range, avoiding Linux ephemeral ports (32768+)
+// and Windows WFP/Hyper-V/VPN reservations (47000+).
 const REDIRECT_HOST = "127.0.0.1";
-const REDIRECT_PORT = 48123;
+const REDIRECT_PORT = 18481;
 const REDIRECT_PATH = "/callback";
 const REDIRECT_URI = `http://${REDIRECT_HOST}:${REDIRECT_PORT}${REDIRECT_PATH}`;
 
@@ -248,6 +250,19 @@ function renderOnboardingView() {
               loading: authInProgress,
               onClick: () => startOAuthLogin(),
             }),
+            setup.mode === "personal"
+              ? ui.button({
+                  label: t("Скопировать Redirect URL", "Copy Redirect URL"),
+                  variant: "ghost",
+                  onClick: () => {
+                    fern.system.clipboardWrite(REDIRECT_URI);
+                    fern.ui.toast(
+                      t(`Скопировано: ${REDIRECT_URI}`, `Copied: ${REDIRECT_URI}`),
+                      "success"
+                    );
+                  },
+                })
+              : ui.spacer(0),
             setup.mode === "personal"
               ? ui.button({
                   label: t("Изменить ключи", "Edit Keys"),

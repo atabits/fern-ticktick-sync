@@ -12,7 +12,7 @@ Official two-way **TickTick Open API v1** synchronization plugin for [Fern](http
 
 ## Setup (OAuth 2.0)
 1. Open [TickTick Developer Portal](https://developer.ticktick.com/manage) and create an app.
-2. Set **OAuth redirect URL** to `http://127.0.0.1:48123/callback`.
+2. Set **OAuth redirect URL** to `http://127.0.0.1:18481/callback`.
 3. In Fern open **Settings → Plugins → TickTick Sync**, paste your **Client ID** and **Client Secret**, and save.
 4. Open the **TickTick** tab in Fern's left sidebar and click **Sign In with TickTick (OAuth)**.
 
