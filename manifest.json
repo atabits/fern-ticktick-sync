@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "api_version": 1,
   "min_fern_version": "0.2.0",
-  "description": "Two-way task and list synchronization with TickTick via official Open API v1 (OAuth 2.0).",
+  "description": "Two-way sync of lists and tasks with TickTick (OAuth 2.0).",
   "author": "atabits",
   "homepage": "https://github.com/atabits/fern-ticktick-sync",
   "entry": "index.js",
@@ -46,7 +46,7 @@
       },
       {
         "id": "connect",
-        "title": "TickTick: Sign In with OAuth"
+        "title": "TickTick: Sign In"
       }
     ]
   },
@@ -54,82 +54,35 @@
     {
       "key": "client_id",
       "type": "text",
-      "label": "TickTick Client ID",
-      "placeholder": "From developer.ticktick.com/manage",
+      "label": "Client ID",
+      "placeholder": "Paste from developer.ticktick.com/manage",
       "default": ""
     },
     {
       "key": "client_secret",
       "type": "secret",
-      "label": "TickTick Client Secret"
-    },
-    {
-      "key": "redirect_host",
-      "type": "select",
-      "label": "OAuth Redirect Host",
-      "options": [
-        { "label": "127.0.0.1 (Recommended)", "value": "127.0.0.1" },
-        { "label": "localhost", "value": "localhost" }
-      ],
-      "default": "127.0.0.1"
-    },
-    {
-      "key": "redirect_port",
-      "type": "number",
-      "label": "OAuth Redirect Port",
-      "default": 48123,
-      "min": 1024,
-      "max": 65535,
-      "step": 1
-    },
-    {
-      "key": "inbox_project_id",
-      "type": "text",
-      "label": "Inbox Project ID (optional)",
-      "placeholder": "Auto-detected (or inbox<userId>)",
-      "default": ""
+      "label": "Client Secret"
     },
     {
       "key": "sync_direction",
       "type": "select",
-      "label": "Sync Direction",
+      "label": "Sync Mode",
       "options": [
-        { "label": "Two-way (Fern <-> TickTick)", "value": "two_way" },
-        { "label": "Pull only (TickTick -> Fern)", "value": "pull_only" },
-        { "label": "Push only (Fern -> TickTick)", "value": "push_only" }
+        { "label": "Two-way (Recommended)", "value": "two_way" },
+        { "label": "TickTick → Fern only", "value": "pull_only" },
+        { "label": "Fern → TickTick only", "value": "push_only" }
       ],
       "default": "two_way"
     },
     {
-      "key": "conflict_policy",
-      "type": "select",
-      "label": "Conflict Resolution",
-      "options": [
-        { "label": "Newest wins (Last-Write-Wins)", "value": "lww" },
-        { "label": "Fern wins", "value": "fern_wins" },
-        { "label": "TickTick wins", "value": "ticktick_wins" }
-      ],
-      "default": "lww"
-    },
-    {
-      "key": "delete_policy",
-      "type": "select",
-      "label": "When Deleted in TickTick",
-      "options": [
-        { "label": "Move to Fern Trash", "value": "trash" },
-        { "label": "Keep in Fern (unlink)", "value": "unlink" }
-      ],
-      "default": "trash"
-    },
-    {
       "key": "sync_interval_min",
       "type": "select",
-      "label": "Auto-Sync Interval",
+      "label": "Auto-Sync",
       "options": [
-        { "label": "Manual only", "value": "0" },
-        { "label": "Every 2 minutes", "value": "2" },
         { "label": "Every 5 minutes", "value": "5" },
-        { "label": "Every 15 minutes", "value": "15" }
+        { "label": "Every 2 minutes", "value": "2" },
+        { "label": "Every 15 minutes", "value": "15" },
+        { "label": "Manual only", "value": "0" }
       ],
       "default": "5"
     }

@@ -1,4 +1,4 @@
-// Fern plugin: TickTick Sync (Official Open API v1 + OAuth 2.0 via SecretsVault)
+// Fern plugin: TickTick Sync — clean, low-friction OAuth 2.0 two-way sync.
 
 import fern from "fern";
 import * as ui from "fern:ui";
@@ -14,31 +14,56 @@ const VIEW_ID = "sync";
 const TIMER_ID = "ticktick-auto-sync";
 const DEVELOPER_PORTAL_URL = "https://developer.ticktick.com/manage";
 
+// Fixed loopback callback handled automatically by Fern — user never edits host/port.
+const REDIRECT_HOST = "127.0.0.1";
+const REDIRECT_PORT = 48123;
+const REDIRECT_PATH = "/callback";
+const REDIRECT_URI = `http://${REDIRECT_HOST}:${REDIRECT_PORT}${REDIRECT_PATH}`;
+
+// Optional official 1-click OAuth broker (see oauth-worker/worker.js).
+// When clientId + tokenBrokerUrl are configured, users sign in with 1 click and zero keys.
+const OFFICIAL_OAUTH = {
+  clientId: "",
+  tokenBrokerUrl: "",
+};
+
 const api = createTickTickClient(fern);
 const engine = createSyncEngine(fern, api);
 
 let activeTab = "lists"; // "lists" | "log" | "advanced"
 let authInProgress = false;
 let authError = null;
-let pendingDirtyFlush = false;
 
 function isRu() {
-  const loc = String(fern.system.locale() || "").toLowerCase();
-  return loc.startsWith("ru");
+  return String(fern.system.locale() || "").toLowerCase().startsWith("ru");
 }
 
 function t(ru, en) {
   return isRu() ? ru : en;
 }
 
-function getOAuthConfig() {
+function getOAuthSetup() {
+  if (OFFICIAL_OAUTH.clientId && OFFICIAL_OAUTH.tokenBrokerUrl) {
+    return {
+      mode: "official",
+      clientId: OFFICIAL_OAUTH.clientId,
+      tokenUrl: OFFICIAL_OAUTH.tokenBrokerUrl,
+      clientSecretKey: undefined,
+      tokenAuth: "body",
+      ready: true,
+    };
+  }
   const clientId = String(fern.settings.get("client_id") || "").trim();
   const hasSecret = fern.settings.hasSecret("client_secret");
-  const redirectHost = String(fern.settings.get("redirect_host") || "127.0.0.1").trim() || "127.0.0.1";
-  const rawPort = Number(fern.settings.get("redirect_port") || 48123);
-  const redirectPort = Number.isFinite(rawPort) && rawPort >= 1024 && rawPort <= 65535 ? Math.round(rawPort) : 48123;
-  const redirectUri = `http://${redirectHost}:${redirectPort}/callback`;
-  return { clientId, hasSecret, redirectHost, redirectPort, redirectUri };
+  return {
+    mode: "personal",
+    clientId,
+    hasSecret,
+    tokenUrl: TICKTICK_TOKEN_URL,
+    clientSecretKey: "client_secret",
+    tokenAuth: "basic",
+    ready: Boolean(clientId && hasSecret),
+  };
 }
 
 function isConnected() {
@@ -46,27 +71,34 @@ function isConnected() {
 }
 
 function formatTime(ms) {
-  if (!ms) return t("никогда", "never");
+  if (!ms) return t("ещё не запускалась", "not synced yet");
   const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return t("никогда", "never");
+  if (Number.isNaN(d.getTime())) return t("ещё не запускалась", "not synced yet");
   const p = (n) => (n < 10 ? "0" + n : String(n));
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function refreshView() {
   fern.views.refresh(VIEW_ID);
 }
 
+function openTickTickPortalWithCopy() {
+  fern.system.clipboardWrite(REDIRECT_URI);
+  fern.system.openExternal(DEVELOPER_PORTAL_URL);
+  fern.ui.toast(
+    t(
+      `Адрес ${REDIRECT_URI} уже в буфере — вставьте его в OAuth redirect URL`,
+      `Copied ${REDIRECT_URI} — paste it into OAuth redirect URL`
+    ),
+    "success"
+  );
+}
+
 async function startOAuthLogin() {
   if (authInProgress) return;
-  const cfg = getOAuthConfig();
-  if (!cfg.clientId || !cfg.hasSecret) {
-    authError = t(
-      "Сначала заполните Client ID и Client Secret в Настройки → Плагины → TickTick Sync.",
-      "Please enter Client ID and Client Secret in Settings → Plugins → TickTick Sync first."
-    );
-    fern.ui.toast(authError, "warning");
-    refreshView();
+  const setup = getOAuthSetup();
+  if (!setup.ready) {
+    fern.ui.openSettings();
     return;
   }
 
@@ -77,33 +109,27 @@ async function startOAuthLogin() {
   try {
     fern.ui.toast(
       t(
-        "Открываю TickTick в браузере — подтвердите доступ…",
-        "Opening TickTick in your browser — please approve access…"
+        "Открываю TickTick в браузере — нажмите «Разрешить»…",
+        "Opening TickTick in your browser — click Allow…"
       ),
       "info"
     );
     const res = await fern.oauth.authorize({
       authorizeUrl: TICKTICK_AUTHORIZE_URL,
-      tokenUrl: TICKTICK_TOKEN_URL,
-      clientId: cfg.clientId,
-      clientSecretKey: "client_secret",
+      tokenUrl: setup.tokenUrl,
+      clientId: setup.clientId,
+      clientSecretKey: setup.clientSecretKey,
       scopes: TICKTICK_SCOPES,
-      redirectHost: cfg.redirectHost,
-      redirectPort: cfg.redirectPort,
-      redirectPath: "/callback",
-      tokenAuth: "basic",
+      redirectHost: REDIRECT_HOST,
+      redirectPort: REDIRECT_PORT,
+      redirectPath: REDIRECT_PATH,
+      tokenAuth: setup.tokenAuth,
       saveAccessTokenAs: "access_token",
       saveRefreshTokenAs: "refresh_token",
       timeoutSec: 180,
     });
     if (res && res.ok) {
-      fern.ui.toast(
-        t(
-          "TickTick успешно подключён через OAuth 2.0!",
-          "Connected to TickTick via OAuth 2.0!"
-        ),
-        "success"
-      );
+      fern.ui.toast(t("TickTick подключён!", "Connected to TickTick!"), "success");
       configureAutoSyncTimer();
       refreshView();
       await runSync(true);
@@ -117,43 +143,12 @@ async function startOAuthLogin() {
   }
 }
 
-async function refreshOAuthTokenManually() {
-  const cfg = getOAuthConfig();
-  if (!cfg.clientId || !fern.settings.hasSecret("refresh_token")) {
-    fern.ui.toast(
-      t(
-        "Нет refresh_token — выполните вход заново через OAuth.",
-        "No refresh token stored — please sign in via OAuth again."
-      ),
-      "warning"
-    );
-    return;
-  }
-  try {
-    await fern.oauth.refresh({
-      tokenUrl: TICKTICK_TOKEN_URL,
-      clientId: cfg.clientId,
-      clientSecretKey: cfg.hasSecret ? "client_secret" : undefined,
-      refreshTokenKey: "refresh_token",
-      scopes: TICKTICK_SCOPES,
-      tokenAuth: "basic",
-      saveAccessTokenAs: "access_token",
-      saveRefreshTokenAs: "refresh_token",
-    });
-    fern.ui.toast(t("Токен TickTick обновлён.", "TickTick OAuth token refreshed."), "success");
-  } catch (err) {
-    fern.ui.toast(String(err && err.message ? err.message : err), "error");
-  } finally {
-    refreshView();
-  }
-}
-
 async function disconnectAccount() {
   const confirmed = await fern.ui.confirm(
     t("Отключить TickTick?", "Disconnect TickTick?"),
     t(
-      "OAuth-токены будут удалены из SecretsVault. Ваши задачи в Fern и TickTick останутся нетронутыми.",
-      "OAuth tokens will be removed from SecretsVault. Tasks in Fern and TickTick will not be deleted."
+      "Ваши задачи в Fern и TickTick останутся на месте.",
+      "Your tasks in Fern and TickTick will stay untouched."
     )
   );
   if (!confirmed) return;
@@ -167,10 +162,7 @@ async function disconnectAccount() {
 async function runSync(showToast = true, opts = {}) {
   if (!isConnected()) {
     if (showToast) {
-      fern.ui.toast(
-        t("Сначала выполните вход через TickTick OAuth.", "Please sign in via TickTick OAuth first."),
-        "warning"
-      );
+      fern.ui.toast(t("Сначала войдите в TickTick.", "Please sign in to TickTick first."), "warning");
     }
     return { ok: false, error: "not_connected" };
   }
@@ -178,21 +170,24 @@ async function runSync(showToast = true, opts = {}) {
   const res = await engine.syncNow(opts);
   if (res.skipped) {
     if (showToast) {
-      fern.ui.toast(t("Синхронизация уже выполняется…", "Sync is already running…"), "info");
+      fern.ui.toast(t("Синхронизация уже идёт…", "Sync is already running…"), "info");
     }
     return res;
   }
   if (res.ok && showToast) {
     const s = res.stats;
+    const total = (s.pulled || 0) + (s.pushed || 0) + (s.completed || 0) + (s.linked || 0);
     fern.ui.toast(
-      t(
-        `TickTick: ↓${s.pulled} ↑${s.pushed} ✓${s.completed} ↔${s.linked}`,
-        `TickTick: ↓${s.pulled} ↑${s.pushed} ✓${s.completed} ↔${s.linked}`
-      ),
+      total === 0
+        ? t("Всё уже синхронизировано", "Everything is up to date")
+        : t(
+            `Синхронизировано: ↓${s.pulled} ↑${s.pushed} ✓${s.completed}`,
+            `Synced: ↓${s.pulled} ↑${s.pushed} ✓${s.completed}`
+          ),
       s.errors > 0 ? "warning" : "success"
     );
   } else if (!res.ok && showToast) {
-    fern.ui.toast(res.error || "TickTick sync failed", "error");
+    fern.ui.toast(res.error || "Sync failed", "error");
   }
   refreshView();
   return res;
@@ -211,95 +206,121 @@ function configureAutoSyncTimer() {
 }
 
 function renderOnboardingView() {
-  const cfg = getOAuthConfig();
-  const ready = Boolean(cfg.clientId && cfg.hasSecret);
+  const setup = getOAuthSetup();
 
-  return ui.vstack({ gap: 12, padding: 16 }, [
-    ui.hstack({ justify: "between", align: "center" }, [
-      ui.heading(t("Синхронизация с TickTick", "TickTick Sync"), 1),
-      ui.badge({
-        label: authInProgress ? t("Ожидание браузера…", "Waiting for browser…") : t("Не подключено", "Not connected"),
-        color: authInProgress ? "#f59e0b" : "#64748b",
+  // Case A: Ready for 1-click OAuth sign-in!
+  if (setup.ready) {
+    return ui.vstack({ gap: 16, padding: 24 }, [
+      ui.hstack({ justify: "between", align: "center" }, [
+        ui.vstack({ gap: 4 }, [
+          ui.heading("TickTick", 1),
+          ui.text({
+            text: t(
+              "Двусторонняя синхронизация списков и задач между Fern и TickTick.",
+              "Two-way sync of lists and tasks between Fern and TickTick."
+            ),
+            muted: true,
+          }),
+        ]),
+        ui.badge({
+          label: authInProgress ? t("Вход…", "Signing in…") : t("Готово ко входу", "Ready to sign in"),
+          color: authInProgress ? "#f59e0b" : "#22c55e",
+        }),
+      ]),
+
+      ui.card({}, [
+        ui.vstack({ gap: 12 }, [
+          ui.text({
+            text: t(
+              "Нажмите кнопку ниже — откроется окно TickTick для подтверждения доступа. Существующие задачи объединятся без дублей.",
+              "Click below to authorize in TickTick. Existing tasks will be linked automatically without duplicates."
+            ),
+            muted: true,
+          }),
+          authError ? ui.text({ text: authError, color: "#ef4444", size: "sm" }) : ui.spacer(0),
+          ui.hstack({ gap: 8, wrap: true }, [
+            ui.button({
+              label: authInProgress
+                ? t("Жду подтверждения в браузере…", "Waiting for browser…")
+                : t("Войти через TickTick", "Sign In with TickTick"),
+              variant: "primary",
+              disabled: authInProgress,
+              loading: authInProgress,
+              onClick: () => startOAuthLogin(),
+            }),
+            setup.mode === "personal"
+              ? ui.button({
+                  label: t("Изменить ключи", "Edit Keys"),
+                  variant: "ghost",
+                  onClick: () => fern.ui.openSettings(),
+                })
+              : ui.spacer(0),
+          ]),
+        ]),
+      ]),
+    ]);
+  }
+
+  // Case B: One-time 2-step personal key setup (zero jargon, 1-click helpers)
+  const missingHint = !setup.clientId && !setup.hasSecret
+    ? t("Осталось вставить Client ID и Client Secret", "Paste Client ID and Client Secret")
+    : !setup.clientId
+      ? t("Осталось вставить Client ID", "Paste Client ID")
+      : t("Осталось вставить Client Secret и нажать Save", "Paste Client Secret and click Save");
+
+  return ui.vstack({ gap: 16, padding: 24 }, [
+    ui.vstack({ gap: 4 }, [
+      ui.heading(t("Подключение TickTick", "Connect TickTick"), 1),
+      ui.text({
+        text: t(
+          "Синхронизирует ваши списки и задачи с мобильным TickTick в обе стороны.",
+          "Keeps your lists and tasks in sync with TickTick across desktop and mobile."
+        ),
+        muted: true,
       }),
     ]),
 
     ui.card(
       {
-        title: t("Подключение через OAuth 2.0", "Connect via OAuth 2.0"),
-        subtitle: t(
-          "Токены хранятся в зашифрованном SecretsVault — JS-код плагина их не видит.",
-          "Tokens are stored in encrypted SecretsVault — never exposed to plugin JS."
-        ),
+        title: t("Настройка за 2 шага (один раз)", "Quick 2-Step Setup (One Time)"),
+        subtitle: missingHint,
       },
       [
-        ui.vstack({ gap: 10 }, [
-          ui.markdown(
-            t(
-              `1. Откройте **TickTick Developer Portal** и создайте приложение (бесплатно, ~1 минута).\n2. В поле **OAuth redirect URL** укажите точно:\n   \`${cfg.redirectUri}\`\n3. Скопируйте **Client ID** и **Client Secret** в **Настройки → Плагины → TickTick Sync** и нажмите «Сохранить».\n4. Вернитесь сюда и нажмите **«Войти через TickTick»**.`,
-              `1. Open **TickTick Developer Portal** and register an app (free, ~1 minute).\n2. Set **OAuth redirect URL** to exactly:\n   \`${cfg.redirectUri}\`\n3. Paste **Client ID** and **Client Secret** in **Settings → Plugins → TickTick Sync** and click Save.\n4. Return here and click **Sign In with TickTick**.`
-            )
-          ),
-
-          ui.hstack({ gap: 8, wrap: true }, [
-            ui.badge({
-              label: cfg.clientId ? "Client ID: OK" : t("Client ID: не задан", "Client ID: missing"),
-              color: cfg.clientId ? "#22c55e" : "#ef4444",
+        ui.vstack({ gap: 14 }, [
+          ui.vstack({ gap: 6 }, [
+            ui.text({
+              text: t(
+                "Шаг 1. Создайте бесплатное приложение в TickTick — нужный Redirect URL мы скопируем в буфер автоматически.",
+                "Step 1. Create a free app in TickTick — we automatically copy the Redirect URL to your clipboard."
+              ),
             }),
-            ui.badge({
-              label: cfg.hasSecret ? "Client Secret: OK" : t("Client Secret: не задан", "Client Secret: missing"),
-              color: cfg.hasSecret ? "#22c55e" : "#ef4444",
-            }),
-            ui.badge({
-              label: `Redirect: ${cfg.redirectUri}`,
-            }),
+            ui.hstack({ gap: 8 }, [
+              ui.button({
+                label: t("1. Открыть TickTick (адрес скопируется сам)", "1. Open TickTick (Auto-Copy URL)"),
+                variant: "secondary",
+                onClick: () => openTickTickPortalWithCopy(),
+              }),
+            ]),
           ]),
 
-          authError
-            ? ui.text({ text: authError, color: "#ef4444", size: "sm" })
-            : ui.spacer(0),
+          ui.divider(),
 
-          ui.hstack({ gap: 8, wrap: true }, [
-            ui.button({
-              label: authInProgress
-                ? t("Жду подтверждения в браузере…", "Waiting for browser…")
-                : t("Войти через TickTick (OAuth)", "Sign In with TickTick (OAuth)"),
-              variant: "primary",
-              disabled: !ready || authInProgress,
-              loading: authInProgress,
-              onClick: () => startOAuthLogin(),
+          ui.vstack({ gap: 6 }, [
+            ui.text({
+              text: t(
+                "Шаг 2. Скопируйте Client ID и Client Secret и вставьте их в настройки плагина.",
+                "Step 2. Copy the generated Client ID and Client Secret into plugin settings."
+              ),
             }),
-            ui.button({
-              label: t("Открыть Developer Portal", "Open Developer Portal"),
-              variant: "secondary",
-              onClick: () => fern.system.openExternal(DEVELOPER_PORTAL_URL),
-            }),
-            ui.button({
-              label: t("Скопировать Redirect URL", "Copy Redirect URL"),
-              variant: "ghost",
-              onClick: () => {
-                fern.system.clipboardWrite(cfg.redirectUri);
-                fern.ui.toast(
-                  t(`Скопировано: ${cfg.redirectUri}`, `Copied: ${cfg.redirectUri}`),
-                  "success"
-                );
-              },
-            }),
+            ui.hstack({ gap: 8 }, [
+              ui.button({
+                label: t("2. Вставить Client ID и Client Secret", "2. Enter Client ID & Secret"),
+                variant: "primary",
+                onClick: () => fern.ui.openSettings(),
+              }),
+            ]),
           ]),
         ]),
-      ]
-    ),
-
-    ui.card(
-      {
-        title: t("Что синхронизируется (Open API v1)", "What Syncs (Open API v1)"),
-      },
-      [
-        ui.markdown(
-          t(
-            "- **Двусторонне:** списки (проекты), Входящие, открытые задачи, заметки, сроки и время, приоритеты, теги, чеклисты, подзадачи, повторения (RRULE) и закрытие задач.\n- **Умный первый синк:** существующие задачи с тем же названием и датой связываются без дублей.\n- **Ограничения TickTick API v1:** архив старых выполненных задач, Привычки и Помодоро не отдаются официальным API.",
-            "- **Two-way:** projects/lists, Inbox, open tasks, notes, due dates/times, priorities, tags, checklists, subtasks, recurrences (RRULE), and task completions.\n- **Smart initial merge:** matching tasks with the same title and due date are linked without duplicates.\n- **TickTick API v1 limits:** historical completed archive, Habits, and Pomodoro are not exposed by the official API."
-          )
-        ),
       ]
     ),
   ]);
@@ -311,9 +332,7 @@ function renderListsTab(state) {
     ui.checkbox({
       key: "proj-inbox",
       checked: state.inboxEnabled !== false,
-      label: state.inboxProjectId
-        ? `${t("Входящие (Inbox)", "Inbox")} (${state.inboxProjectId})`
-        : t("Входящие (Inbox — авто-определение)", "Inbox (auto-detect)"),
+      label: t("Входящие (Inbox)", "Inbox"),
       onChange: (checked) => {
         engine.toggleProjectEnabled(INBOX_KEY, checked);
         refreshView();
@@ -337,11 +356,7 @@ function renderListsTab(state) {
 
   return ui.card(
     {
-      title: t("Синхронизируемые списки", "Synced Lists"),
-      subtitle: t(
-        "Отметьте списки TickTick, которые нужно синхронизировать с Fern.",
-        "Select which TickTick lists should sync with Fern."
-      ),
+      title: t("Какие списки синхронизировать", "Synced Lists"),
     },
     [
       projects.length === 0
@@ -349,8 +364,8 @@ function renderListsTab(state) {
             ...items,
             ui.text({
               text: t(
-                "Нажмите «Синхронизировать сейчас», чтобы загрузить список проектов из TickTick.",
-                "Click Sync Now to fetch your project list from TickTick."
+                "Нажмите «Синхронизировать», чтобы подгрузить ваши списки из TickTick.",
+                "Click Sync Now to load your TickTick lists."
               ),
               muted: true,
               size: "sm",
@@ -365,23 +380,23 @@ function renderLogTab() {
   const logs = engine.loadLogs();
   if (logs.length === 0) {
     return ui.emptyState({
-      title: t("Журнал синхронизации пуст", "Sync log is empty"),
+      title: t("Событий пока нет", "No activity yet"),
       subtitle: t(
-        "Здесь будут отображаться все созданные, обновлённые и закрытые задачи.",
-        "Synced creations, updates, completions, and conflicts will appear here."
+        "После синхронизации здесь появятся все изменения задач.",
+        "Synced tasks and updates will appear here."
       ),
     });
   }
 
   return ui.card(
     {
-      title: t(`Последние события (${logs.length})`, `Recent Activity (${logs.length})`),
+      title: t(`История (${logs.length})`, `Activity (${logs.length})`),
     },
     [
-      ui.vstack({ gap: 6 }, [
+      ui.vstack({ gap: 8 }, [
         ui.hstack({ gap: 8, justify: "end" }, [
           ui.button({
-            label: t("Скопировать журнал", "Copy Log"),
+            label: t("Скопировать", "Copy"),
             variant: "ghost",
             size: "sm",
             onClick: () => {
@@ -389,7 +404,7 @@ function renderLogTab() {
                 .map((l) => `[${formatTime(l.at)}] [${l.level}] ${l.text}`)
                 .join("\n");
               fern.system.clipboardWrite(text);
-              fern.ui.toast(t("Журнал скопирован.", "Log copied to clipboard."), "success");
+              fern.ui.toast(t("Журнал скопирован", "Log copied"), "success");
             },
           }),
           ui.button({
@@ -418,91 +433,70 @@ function renderLogTab() {
   );
 }
 
-function renderAdvancedTab(state) {
-  const dir = String(fern.settings.get("sync_direction") || "two_way");
-  const conflict = String(fern.settings.get("conflict_policy") || "lww");
-  const interval = String(fern.settings.get("sync_interval_min") ?? "5");
-
-  return ui.vstack({ gap: 12 }, [
-    ui.card({ title: t("Текущая конфигурация", "Current Configuration") }, [
-      ui.vstack({ gap: 6 }, [
-        ui.keyValue({ label: t("Направление", "Direction"), value: dir }),
-        ui.keyValue({ label: t("Конфликты", "Conflict policy"), value: conflict }),
-        ui.keyValue({
-          label: t("Авто-синк", "Auto-sync"),
-          value: interval === "0" ? t("Вручную", "Manual") : `${interval} min`,
+function renderAdvancedTab() {
+  return ui.card(
+    {
+      title: t("Управление подключением", "Connection & Maintenance"),
+      subtitle: t(
+        "Если синхронизируете Fern между несколькими ПК, включайте TickTick Sync только на одном основном устройстве.",
+        "If syncing Fern across multiple PCs, keep TickTick Sync enabled on one primary PC only."
+      ),
+    },
+    [
+      ui.hstack({ gap: 8, wrap: true }, [
+        ui.button({
+          label: t("Настройки плагина", "Plugin Settings"),
+          variant: "secondary",
+          size: "sm",
+          onClick: () => fern.ui.openSettings(),
         }),
-        ui.keyValue({
-          label: "Inbox Project ID",
-          value: state.inboxProjectId || t("авто", "auto"),
+        ui.button({
+          label: t("Только забрать из TickTick", "Pull Only Now"),
+          variant: "secondary",
+          size: "sm",
+          disabled: engine.isSyncing(),
+          onClick: () => runSync(true, { direction: "pull_only" }),
+        }),
+        ui.button({
+          label: t("Сбросить связи", "Reset Mapping"),
+          variant: "secondary",
+          size: "sm",
+          onClick: async () => {
+            const ok = await fern.ui.confirm(
+              t("Сбросить связи задач?", "Reset sync mapping?"),
+              t(
+                "Задачи не удалятся; при следующем синке они свяжутся заново.",
+                "Tasks will not be deleted; the next sync will re-link them."
+              )
+            );
+            if (ok) {
+              engine.resetMapping();
+              refreshView();
+            }
+          },
+        }),
+        ui.button({
+          label: t("Отключить TickTick", "Disconnect"),
+          variant: "destructive",
+          size: "sm",
+          onClick: () => disconnectAccount(),
         }),
       ]),
-    ]),
-
-    ui.card(
-      {
-        title: t("Действия и обслуживание", "Actions & Maintenance"),
-        subtitle: t(
-          "Если включена E2EE-синхронизация Fern между несколькими ПК, держите TickTick Sync активным только на одном основном ПК.",
-          "If using Fern E2EE sync across multiple PCs, keep TickTick Sync enabled on one primary PC only."
-        ),
-      },
-      [
-        ui.hstack({ gap: 8, wrap: true }, [
-          ui.button({
-            label: t("Только забрать из TickTick", "Pull Only Now"),
-            variant: "secondary",
-            size: "sm",
-            disabled: engine.isSyncing(),
-            onClick: () => runSync(true, { direction: "pull_only" }),
-          }),
-          ui.button({
-            label: t("Обновить OAuth-токен", "Refresh OAuth Token"),
-            variant: "secondary",
-            size: "sm",
-            onClick: () => refreshOAuthTokenManually(),
-          }),
-          ui.button({
-            label: t("Сбросить связи (mapping)", "Reset Sync Mapping"),
-            variant: "secondary",
-            size: "sm",
-            onClick: async () => {
-              const ok = await fern.ui.confirm(
-                t("Сбросить таблицу связей?", "Reset sync mapping?"),
-                t(
-                  "Задачи останутся на месте; при следующем синке выполнится повторное связывание по названию и дате.",
-                  "Tasks will not be deleted; the next sync will re-link matching tasks by title and due date."
-                )
-              );
-              if (ok) {
-                engine.resetMapping();
-                refreshView();
-              }
-            },
-          }),
-          ui.button({
-            label: t("Отключить аккаунт", "Disconnect Account"),
-            variant: "destructive",
-            size: "sm",
-            onClick: () => disconnectAccount(),
-          }),
-        ]),
-      ]
-    ),
-  ]);
+    ]
+  );
 }
 
 function renderConnectedView() {
   const state = engine.loadState();
   const dirtyCount = Object.keys(engine.loadDirtyQueue()).length;
   const linkedCount = Object.keys(state.tasks || {}).length;
-  const summary = state.lastSyncSummary || { pulled: 0, pushed: 0, completed: 0, conflicts: 0 };
+  const summary = state.lastSyncSummary || { pulled: 0, pushed: 0 };
   const busy = engine.isSyncing();
 
-  return ui.vstack({ gap: 12, padding: 16 }, [
+  return ui.vstack({ gap: 14, padding: 24 }, [
     ui.hstack({ justify: "between", align: "center", wrap: true }, [
       ui.vstack({ gap: 2 }, [
-        ui.heading(t("TickTick Sync", "TickTick Sync"), 1),
+        ui.heading("TickTick", 1),
         ui.text({
           text: `${t("Последний синк", "Last sync")}: ${formatTime(state.lastSyncAt)}`,
           muted: true,
@@ -511,11 +505,11 @@ function renderConnectedView() {
       ]),
       ui.hstack({ gap: 8, align: "center" }, [
         ui.badge({
-          label: busy ? t("Синхронизация…", "Syncing…") : t("OAuth подключён", "OAuth Connected"),
+          label: busy ? t("Синхронизация…", "Syncing…") : t("Подключено", "Connected"),
           color: busy ? "#f59e0b" : "#22c55e",
         }),
         ui.button({
-          label: busy ? t("Синхронизация…", "Syncing…") : t("Синхронизировать сейчас", "Sync Now"),
+          label: busy ? t("Синхронизация…", "Syncing…") : t("Синхронизировать", "Sync Now"),
           variant: "primary",
           disabled: busy,
           loading: busy,
@@ -525,9 +519,7 @@ function renderConnectedView() {
     ]),
 
     state.lastError
-      ? ui.card({ title: t("Последняя ошибка", "Last Error") }, [
-          ui.text({ text: state.lastError, color: "#ef4444", size: "sm" }),
-        ])
+      ? ui.card({}, [ui.text({ text: state.lastError, color: "#ef4444", size: "sm" })])
       : ui.spacer(0),
 
     ui.grid({ cols: 4, gap: 8 }, [
@@ -542,8 +534,8 @@ function renderConnectedView() {
       value: activeTab,
       options: [
         { label: t("Списки", "Lists"), value: "lists" },
-        { label: t("Журнал", "Log"), value: "log" },
-        { label: t("Управление", "Manage"), value: "advanced" },
+        { label: t("История", "Activity"), value: "log" },
+        { label: t("Дополнительно", "More"), value: "advanced" },
       ],
       onChange: (val) => {
         activeTab = val;
@@ -555,7 +547,7 @@ function renderConnectedView() {
       ? renderListsTab(state)
       : activeTab === "log"
         ? renderLogTab()
-        : renderAdvancedTab(state),
+        : renderAdvancedTab(),
   ]);
 }
 
@@ -563,12 +555,7 @@ function handleLocalTaskEvent(ev) {
   if (!isConnected()) return;
   if (ev.originPlugin === "com.fern.ticktick-sync") return;
   engine.enqueueLocalEvent(ev.kind, ev.entityId, ev.entity);
-  if (!pendingDirtyFlush) {
-    pendingDirtyFlush = true;
-    // Queue is flushed on the next auto-sync tick or manual sync; keep dirty count fresh in UI.
-    refreshView();
-    pendingDirtyFlush = false;
-  }
+  refreshView();
 }
 
 export function activate() {
@@ -578,10 +565,7 @@ export function activate() {
     },
   });
 
-  fern.commands.register("sync_now", async () => {
-    return runSync(true);
-  });
-
+  fern.commands.register("sync_now", async () => runSync(true));
   fern.commands.register("connect", async () => {
     await startOAuthLogin();
     return { connected: isConnected() };
