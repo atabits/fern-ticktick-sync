@@ -13,6 +13,7 @@ import { createSyncEngine, INBOX_KEY } from "./sync_engine.js";
 const VIEW_ID = "sync";
 const TIMER_ID = "ticktick-auto-sync";
 const DEVELOPER_PORTAL_URL = "https://developer.ticktick.com/manage";
+const OAUTH_TIMEOUT_SEC = 120;
 
 // Fixed loopback callback handled automatically by Fern — user never edits host/port.
 // Port 18481 stays in the safe 10000–32000 range, avoiding Linux ephemeral ports (32768+)
@@ -29,12 +30,11 @@ const OFFICIAL_OAUTH = {
   tokenBrokerUrl: "",
 };
 
-const api = createTickTickClient(fern);
-const engine = createSyncEngine(fern, api);
-
 let activeTab = "lists"; // "lists" | "log" | "advanced"
 let authInProgress = false;
+let authAttemptId = 0;
 let authError = null;
+let viewMounted = false;
 
 function isRu() {
   return String(fern.system.locale() || "").toLowerCase().startsWith("ru");
@@ -62,11 +62,30 @@ function getOAuthSetup() {
     clientId,
     hasSecret,
     tokenUrl: TICKTICK_TOKEN_URL,
-    clientSecretKey: "client_secret",
+    clientSecretKey: hasSecret ? "client_secret" : undefined,
     tokenAuth: "basic",
     ready: Boolean(clientId && hasSecret),
   };
 }
+
+function refreshView() {
+  fern.views.refresh(VIEW_ID);
+}
+
+const api = createTickTickClient(fern, {
+  getOAuthSetup,
+  onAuthExpired(message) {
+    fern.timers.clearInterval(TIMER_ID);
+    authError =
+      message ||
+      t(
+        "Сессия TickTick истекла — войдите заново.",
+        "TickTick session expired — please sign in again."
+      );
+    refreshView();
+  },
+});
+const engine = createSyncEngine(fern, api);
 
 function isConnected() {
   return fern.settings.hasSecret("access_token");
@@ -77,11 +96,18 @@ function formatTime(ms) {
   const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return t("ещё не запускалась", "not synced yet");
   const p = (n) => (n < 10 ? "0" + n : String(n));
-  return `${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function refreshView() {
-  fern.views.refresh(VIEW_ID);
+  const hhmm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const now = new Date();
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return hhmm;
+  }
+  return isRu()
+    ? `${p(d.getDate())}.${p(d.getMonth() + 1)} ${hhmm}`
+    : `${p(d.getMonth() + 1)}/${p(d.getDate())} ${hhmm}`;
 }
 
 function openTickTickPortalWithCopy() {
@@ -105,6 +131,7 @@ async function startOAuthLogin() {
   }
 
   authInProgress = true;
+  const myAttempt = ++authAttemptId;
   authError = null;
   refreshView();
 
@@ -128,24 +155,44 @@ async function startOAuthLogin() {
       tokenAuth: setup.tokenAuth,
       saveAccessTokenAs: "access_token",
       saveRefreshTokenAs: "refresh_token",
-      timeoutSec: 180,
+      timeoutSec: OAUTH_TIMEOUT_SEC,
     });
+    if (myAttempt !== authAttemptId) return;
     if (res && res.ok) {
+      api.resetRateLimit();
       fern.ui.toast(t("TickTick подключён!", "Connected to TickTick!"), "success");
       configureAutoSyncTimer();
       refreshView();
       await runSync(true);
+    } else {
+      authError =
+        (res && res.error) ||
+        t(
+          "Авторизация в TickTick не завершилась. Попробуйте ещё раз.",
+          "TickTick authorization did not complete. Please try again."
+        );
+      fern.ui.toast(authError, "error");
     }
   } catch (err) {
+    if (myAttempt !== authAttemptId) return;
     authError = String(err && err.message ? err.message : err);
     fern.ui.toast(authError, "error");
   } finally {
-    authInProgress = false;
-    refreshView();
+    if (myAttempt === authAttemptId) {
+      authInProgress = false;
+      refreshView();
+    }
   }
 }
 
 async function disconnectAccount() {
+  if (engine.isSyncing()) {
+    fern.ui.toast(
+      t("Дождитесь завершения текущей синхронизации.", "Wait for the current sync to finish first."),
+      "warning"
+    );
+    return;
+  }
   const confirmed = await fern.ui.confirm(
     t("Отключить TickTick?", "Disconnect TickTick?"),
     t(
@@ -153,12 +200,43 @@ async function disconnectAccount() {
       "Your tasks in Fern and TickTick will stay untouched."
     )
   );
-  if (!confirmed) return;
+  if (!confirmed || engine.isSyncing()) return;
   fern.oauth.clearTokens(["access_token", "refresh_token"]);
   fern.timers.clearInterval(TIMER_ID);
+  api.resetRateLimit();
   authError = null;
   fern.ui.toast(t("TickTick отключён.", "Disconnected from TickTick."), "info");
   refreshView();
+}
+
+function showSyncToast(stats) {
+  const parts = [];
+  if (stats.pulled) parts.push(`↓${stats.pulled}`);
+  if (stats.pushed) parts.push(`↑${stats.pushed}`);
+  if (stats.completed) parts.push(`✓${stats.completed}`);
+  if (stats.deleted) parts.push(`×${stats.deleted}`);
+  if (stats.linked) parts.push(`↔${stats.linked}`);
+
+  if (parts.length === 0 && stats.errors > 0) {
+    fern.ui.toast(
+      t(
+        `Синхронизация завершилась с ошибками (${stats.errors})`,
+        `Sync completed with ${stats.errors} error(s)`
+      ),
+      "warning"
+    );
+    return;
+  }
+  if (parts.length === 0) {
+    fern.ui.toast(t("Всё уже синхронизировано", "Everything is up to date"), "success");
+    return;
+  }
+  const errSuffix =
+    stats.errors > 0 ? t(` (ошибок: ${stats.errors})`, ` (${stats.errors} err)`) : "";
+  fern.ui.toast(
+    `${t("Синхронизировано", "Synced")}: ${parts.join(" ")}${errSuffix}`,
+    stats.errors > 0 ? "warning" : "success"
+  );
 }
 
 async function runSync(showToast = true, opts = {}) {
@@ -177,19 +255,9 @@ async function runSync(showToast = true, opts = {}) {
     return res;
   }
   if (res.ok && showToast) {
-    const s = res.stats;
-    const total = (s.pulled || 0) + (s.pushed || 0) + (s.completed || 0) + (s.linked || 0);
-    fern.ui.toast(
-      total === 0
-        ? t("Всё уже синхронизировано", "Everything is up to date")
-        : t(
-            `Синхронизировано: ↓${s.pulled} ↑${s.pushed} ✓${s.completed}`,
-            `Synced: ↓${s.pulled} ↑${s.pushed} ✓${s.completed}`
-          ),
-      s.errors > 0 ? "warning" : "success"
-    );
+    showSyncToast(res.stats);
   } else if (!res.ok && showToast) {
-    fern.ui.toast(res.error || "Sync failed", "error");
+    fern.ui.toast(res.error || t("Ошибка синхронизации", "Sync failed"), "error");
   }
   refreshView();
   return res;
@@ -203,6 +271,7 @@ function configureAutoSyncTimer() {
   const intervalMs = Math.max(10_000, Math.round(mins * 60 * 1000));
   fern.timers.setInterval(TIMER_ID, intervalMs, async () => {
     if (!isConnected() || engine.isSyncing()) return;
+    if (api.getRateLimitedUntil() > Date.now()) return;
     await runSync(false);
   });
 }
@@ -242,8 +311,9 @@ function renderOnboardingView() {
           authError ? ui.text({ text: authError, color: "#ef4444", size: "sm" }) : ui.spacer(0),
           ui.hstack({ gap: 8, wrap: true }, [
             ui.button({
+              // Note: Fern host appends "…" automatically when loading === true.
               label: authInProgress
-                ? t("Жду подтверждения в браузере…", "Waiting for browser…")
+                ? t("Жду подтверждения в браузере", "Waiting for browser")
                 : t("Войти через TickTick", "Sign In with TickTick"),
               variant: "primary",
               disabled: authInProgress,
@@ -267,6 +337,7 @@ function renderOnboardingView() {
               ? ui.button({
                   label: t("Изменить ключи", "Edit Keys"),
                   variant: "ghost",
+                  disabled: authInProgress,
                   onClick: () => fern.ui.openSettings(),
                 })
               : ui.spacer(0),
@@ -281,7 +352,10 @@ function renderOnboardingView() {
     ? t("Осталось вставить Client ID и Client Secret", "Paste Client ID and Client Secret")
     : !setup.clientId
       ? t("Осталось вставить Client ID", "Paste Client ID")
-      : t("Осталось вставить Client Secret и нажать Save", "Paste Client Secret and click Save");
+      : t(
+          "Осталось вставить Client Secret и нажать «Сохранить»",
+          "Paste Client Secret and click Save"
+        );
 
   return ui.vstack({ gap: 16, padding: 24 }, [
     ui.vstack({ gap: 4 }, [
@@ -341,12 +415,13 @@ function renderOnboardingView() {
   ]);
 }
 
-function renderListsTab(state) {
+function renderListsTab(state, busy) {
   const projects = Object.entries(state.projects || {});
   const items = [
     ui.checkbox({
       key: "proj-inbox",
       checked: state.inboxEnabled !== false,
+      disabled: busy,
       label: t("Входящие (Inbox)", "Inbox"),
       onChange: (checked) => {
         engine.toggleProjectEnabled(INBOX_KEY, checked);
@@ -360,6 +435,7 @@ function renderListsTab(state) {
       ui.checkbox({
         key: `proj-${ttPid}`,
         checked: meta.enabled !== false,
+        disabled: busy,
         label: meta.name || ttPid,
         onChange: (checked) => {
           engine.toggleProjectEnabled(ttPid, checked);
@@ -368,6 +444,16 @@ function renderListsTab(state) {
       })
     );
   }
+
+  const emptyListHint = state.lastSyncAt
+    ? t(
+        "Синхронизируются Входящие (в TickTick нет дополнительных списков).",
+        "Syncing Inbox (no additional lists in TickTick)."
+      )
+    : t(
+        "Нажмите «Синхронизировать», чтобы подгрузить ваши списки из TickTick.",
+        "Click Sync Now to load your TickTick lists."
+      );
 
   return ui.card(
     {
@@ -378,10 +464,7 @@ function renderListsTab(state) {
         ? ui.vstack({ gap: 8 }, [
             ...items,
             ui.text({
-              text: t(
-                "Нажмите «Синхронизировать», чтобы подгрузить ваши списки из TickTick.",
-                "Click Sync Now to load your TickTick lists."
-              ),
+              text: emptyListHint,
               muted: true,
               size: "sm",
             }),
@@ -448,7 +531,7 @@ function renderLogTab() {
   );
 }
 
-function renderAdvancedTab() {
+function renderAdvancedTab(busy) {
   return ui.card(
     {
       title: t("Управление подключением", "Connection & Maintenance"),
@@ -469,14 +552,16 @@ function renderAdvancedTab() {
           label: t("Только забрать из TickTick", "Pull Only Now"),
           variant: "secondary",
           size: "sm",
-          disabled: engine.isSyncing(),
+          disabled: busy,
           onClick: () => runSync(true, { direction: "pull_only" }),
         }),
         ui.button({
           label: t("Сбросить связи", "Reset Mapping"),
           variant: "secondary",
           size: "sm",
+          disabled: busy,
           onClick: async () => {
+            if (engine.isSyncing()) return;
             const ok = await fern.ui.confirm(
               t("Сбросить связи задач?", "Reset sync mapping?"),
               t(
@@ -484,7 +569,7 @@ function renderAdvancedTab() {
                 "Tasks will not be deleted; the next sync will re-link them."
               )
             );
-            if (ok) {
+            if (ok && !engine.isSyncing()) {
               engine.resetMapping();
               refreshView();
             }
@@ -494,6 +579,7 @@ function renderAdvancedTab() {
           label: t("Отключить TickTick", "Disconnect"),
           variant: "destructive",
           size: "sm",
+          disabled: busy,
           onClick: () => disconnectAccount(),
         }),
       ]),
@@ -524,7 +610,8 @@ function renderConnectedView() {
           color: busy ? "#f59e0b" : "#22c55e",
         }),
         ui.button({
-          label: busy ? t("Синхронизация…", "Syncing…") : t("Синхронизировать", "Sync Now"),
+          // Note: Fern host appends "…" automatically when loading === true.
+          label: busy ? t("Синхронизация", "Syncing") : t("Синхронизировать", "Sync Now"),
           variant: "primary",
           disabled: busy,
           loading: busy,
@@ -559,10 +646,10 @@ function renderConnectedView() {
     }),
 
     activeTab === "lists"
-      ? renderListsTab(state)
+      ? renderListsTab(state, busy)
       : activeTab === "log"
         ? renderLogTab()
-        : renderAdvancedTab(),
+        : renderAdvancedTab(busy),
   ]);
 }
 
@@ -570,11 +657,22 @@ function handleLocalTaskEvent(ev) {
   if (!isConnected()) return;
   if (ev.originPlugin === "com.fern.ticktick-sync") return;
   engine.enqueueLocalEvent(ev.kind, ev.entityId, ev.entity);
-  refreshView();
+  if (viewMounted) {
+    refreshView();
+  }
 }
 
 export function activate() {
+  authInProgress = false;
+  authAttemptId += 1;
+
   fern.views.register(VIEW_ID, {
+    mount() {
+      viewMounted = true;
+    },
+    unmount() {
+      viewMounted = false;
+    },
     render() {
       return isConnected() ? renderConnectedView() : renderOnboardingView();
     },
@@ -597,6 +695,7 @@ export function activate() {
   }
 
   fern.settings.onChange(() => {
+    authError = null;
     configureAutoSyncTimer();
     refreshView();
   });
@@ -606,4 +705,7 @@ export function activate() {
 
 export function deactivate() {
   fern.timers.clearInterval(TIMER_ID);
+  authInProgress = false;
+  authAttemptId += 1;
+  viewMounted = false;
 }

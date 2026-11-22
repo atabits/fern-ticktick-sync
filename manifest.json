@@ -13,10 +13,7 @@
     "tasks:write",
     "lists:read",
     "lists:write",
-    "tags:read",
-    "tags:write",
     "storage",
-    "meta",
     "clipboard",
     { "network": ["api.ticktick.com", "ticktick.com"] }
   ],
@@ -85,6 +82,27 @@
         { "label": "Manual only", "value": "0" }
       ],
       "default": "5"
+    },
+    {
+      "key": "conflict_policy",
+      "type": "select",
+      "label": "Conflict Policy",
+      "options": [
+        { "label": "Last-Write-Wins (Recommended)", "value": "lww" },
+        { "label": "Fern wins", "value": "fern_wins" },
+        { "label": "TickTick wins", "value": "ticktick_wins" }
+      ],
+      "default": "lww"
+    },
+    {
+      "key": "delete_policy",
+      "type": "select",
+      "label": "When Deleted in TickTick",
+      "options": [
+        { "label": "Move to Trash in Fern", "value": "trash" },
+        { "label": "Unlink only (keep in Fern)", "value": "unlink" }
+      ],
+      "default": "trash"
     }
   ]
 }

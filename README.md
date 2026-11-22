@@ -3,12 +3,12 @@
 Official two-way **TickTick Open API v1** synchronization plugin for [Fern](https://github.com/atabits/fern) with zero-secret-exposure **OAuth 2.0** (`SecretsVault`).
 
 ## Features
-- **OAuth 2.0 Loopback Login:** Click **Sign In with TickTick (OAuth)** inside Fern; tokens are exchanged by Fern's Rust host and stored encrypted in `SecretsVault` (`${secret:access_token}` / `${secret:refresh_token}` — never visible to plugin JS).
-- **3-Way Sync Engine:** Canonical task fingerprinting prevents sync loops, echoes, and ping-pong overwrites.
-- **Smart Initial Merge:** Matches existing lists by name and links matching `(title, dueDate)` tasks on first sync without creating duplicates.
-- **Full Field Coverage:** Projects/lists, Inbox, titles, notes, due/start dates & times (timezone-safe all-day handling), priorities (`0/1/3/5`), tags, checklists (`items`), subtasks (`parentId`), reminders, and recurring rules (`RRULE`) with automatic recurring occurrence rebinding.
-- **Vanished Task Detection:** Probes disappeared TickTick tasks via `GET /project/{pid}/task/{tid}` to distinguish completions (`status >= 1`) from deletions (`404`).
-- **Configurable:** Two-way / Pull-only / Push-only, conflict policy (`Last-Write-Wins` / `Fern wins` / `TickTick wins`), per-list checkboxes, auto-sync interval, and live activity log.
+- **OAuth 2.0 Loopback Login:** Click **Sign In with TickTick** inside Fern; tokens are exchanged by Fern's Rust host and stored encrypted in `SecretsVault` (`${secret:access_token}` / `${secret:refresh_token}` — never visible to plugin JS).
+- **3-Way Sync Engine:** Canonical task fingerprinting prevents sync loops, echoes, and ping-pong overwrites, with atomic batch linking and safe concurrent dirty-queue merging.
+- **Smart Initial Merge:** Matches existing active lists by name and links matching `(title, dueDate)` tasks on first sync without creating duplicates or silently overwriting divergent fields.
+- **Full Field Coverage:** Projects/lists, Inbox, titles, notes/checklist descriptions, due/start dates & times (timezone/DST-safe all-day and multi-day span handling), priorities (`0/1/3/5`), tags, checklists (`items` ordered by `sortOrder`), subtasks (`parentId`), reminders, and recurring rules (`RRULE`, `ERULE`, `LUNAR`).
+- **Vanished Task Detection:** Probes disappeared TickTick tasks via `GET /project/{pid}/task/{tid}` to distinguish completions (`status != 0`) from deletions (`404`).
+- **Configurable:** Sync mode (`two_way` / `pull_only` / `push_only`), conflict policy (`Last-Write-Wins` / `Fern wins` / `TickTick wins`), remote delete policy (`Move to Trash` / `Unlink only`), per-list checkboxes, auto-sync interval, and live activity log.
 
 ## Setup (OAuth 2.0)
 1. Open [TickTick Developer Portal](https://developer.ticktick.com/manage) and create an app.
